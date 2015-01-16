@@ -64,9 +64,7 @@ namespace Microsoft.NodejsTools.Debugger {
         /// <summary>
         /// Gets a script file name which holds a code segment of the frame.
         /// </summary>
-        public string FileName {
-            get { return Module != null ? Module.FileName : null; }
-        }
+        public string FileName { get; set; }
 
         /// <summary>
         /// Gets a script which holds a code segment of the frame.

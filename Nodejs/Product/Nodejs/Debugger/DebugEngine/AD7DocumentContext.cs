@@ -79,11 +79,13 @@ namespace Microsoft.NodejsTools.Debugger.DebugEngine {
                 NodeModule module = Module;
                 if (module != null) {
                     // Lazily create document per module
-                    ppDocument = (AD7Document)module.Document;
-                    if (ppDocument == null) {
-                        ppDocument = new AD7Document(this);
-                        module.Document = ppDocument;
+                    object document; 
+                    if(!module.Documents.TryGetValue(this.FileName, out document))
+                    {
+                        document = new AD7Document(this);
+                        module.Documents.Add(this.FileName, document);
                     }
+                    ppDocument = (AD7Document)document;
                 }
             }
             return ppDocument != null ? VSConstants.S_OK : VSConstants.E_FAIL;

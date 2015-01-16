@@ -29,6 +29,7 @@ using Microsoft.NodejsTools.Debugger.Events;
 using Microsoft.NodejsTools.Debugger.Serialization;
 using Microsoft.NodejsTools.SourceMapping;
 using Microsoft.VisualStudioTools;
+using System.Collections.ObjectModel;
 
 namespace Microsoft.NodejsTools.Debugger {
     /// <summary>
@@ -43,6 +44,7 @@ namespace Microsoft.NodejsTools.Debugger {
         private readonly Dictionary<int, string> _errorCodes = new Dictionary<int, string>();
         private readonly ExceptionHandler _exceptionHandler;
         private readonly Dictionary<string, NodeModule> _modules = new Dictionary<string, NodeModule>(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, NodeModule> _modulesByOriginalFileName = new Dictionary<string, NodeModule>(StringComparer.OrdinalIgnoreCase);
         private readonly EvaluationResultFactory _resultFactory;
         private readonly SourceMapper _sourceMapper;
         private readonly Dictionary<int, NodeThread> _threads = new Dictionary<int, NodeThread>();
@@ -533,10 +535,11 @@ namespace Microsoft.NodejsTools.Debugger {
             foreach (NodeModule module in modules) {
                 NodeModule newModule;
                 if (GetOrAddModule(module, out newModule)) {
-                    if (newModule.FileName != newModule.JavaScriptFileName) {
+                    if (newModule.IsMappedModule) {
                         foreach (var breakpoint in _breakpointBindings) {
                             var target = breakpoint.Value.Breakpoint.Target;
-                            if (target.FileName == newModule.FileName) {
+                            var tsTarget = this.SourceMapper.MapToOriginal(target.FileName, target.Line, target.Column);
+                            if (target.FileName == tsTarget.FileName) {
                                 // attempt to rebind the breakpoint
                                 DebuggerClient.RunWithRequestExceptionsHandled(async () => {
                                     await breakpoint.Value.Breakpoint.BindAsync().WaitAsync(TimeSpan.FromSeconds(2));
@@ -781,12 +784,13 @@ namespace Microsoft.NodejsTools.Debugger {
                 string functionName = stackFrame.FunctionName;
 
                 // Map file position to original, if required
-                if (module.JavaScriptFileName != module.FileName) {
+                if (module.IsMappedModule) {
                     SourceMapInfo mapping = SourceMapper.MapToOriginal(module.JavaScriptFileName, line, column);
                     if (mapping != null) {
                         line = mapping.Line;
                         column = mapping.Column;
                         functionName = string.IsNullOrEmpty(mapping.Name) ? functionName : mapping.Name;
+                        stackFrame.FileName = mapping.FileName;
                     }
                 }
 
@@ -885,7 +889,7 @@ namespace Microsoft.NodejsTools.Debugger {
                     // Attempt to fire breakpoint hit event without actually resuming
                     NodeStackFrame topFrame = MainThread.TopStackFrame;
                     int currentLine = topFrame.Line;
-                    string breakFileName = topFrame.Module.FileName;
+                    string breakFileName = topFrame.FileName;
                     NodeModule breakModule = GetModuleForFilePath(breakFileName);
 
                     var breakpointBindings = new List<NodeBreakpointBinding>();
@@ -1206,26 +1210,31 @@ namespace Microsoft.NodejsTools.Debugger {
             javaScriptFileName = FileNameMapper.GetLocalFileName(javaScriptFileName);
 
             // Try to get mapping for JS file
-            String originalFileName = SourceMapper.MapToOriginal(javaScriptFileName);
+            ReadOnlyCollection<string> originalFileName = SourceMapper.MapToOriginal(javaScriptFileName);
             if (originalFileName == null) {
                 module = new NodeModule(module.Id, javaScriptFileName);
             } else {
                 string directoryName = Path.GetDirectoryName(javaScriptFileName) ?? string.Empty;
-                string fileName = CommonUtils.GetAbsoluteFilePath(directoryName, originalFileName.Replace('/', '\\'));
+                string[] fileName = originalFileName 
+                    .Select(_=> CommonUtils.GetAbsoluteFilePath(directoryName, _.Replace('/', '\\')))
+                    .ToArray();
 
                 module = new NodeModule(module.Id, fileName, javaScriptFileName);
             }
 
             // Check whether module already exits
-            if (_modules.TryGetValue(module.FileName, out value)) {
+            if (_modules.TryGetValue(module.JavaScriptFileName, out value)) {
                 return false;
             }
 
             value = module;
 
             // Add module
-            _modules[module.FileName] = module;
-
+            _modules[module.JavaScriptFileName] = module;
+            foreach (var item in module.FileNames)
+            {
+                _modulesByOriginalFileName.Add(item, module);
+            }
             return true;
         }
 
@@ -1236,7 +1245,7 @@ namespace Microsoft.NodejsTools.Debugger {
         /// <returns>Module.</returns>
         public NodeModule GetModuleForFilePath(string filePath) {
             NodeModule module;
-            _modules.TryGetValue(filePath, out module);
+            _modulesByOriginalFileName.TryGetValue(filePath, out module);
             return module;
         }
 

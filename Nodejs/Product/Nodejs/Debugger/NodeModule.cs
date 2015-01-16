@@ -14,24 +14,32 @@
 //
 //*********************************************************//
 
+using System.Collections.Generic;
+using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.IO;
 
 namespace Microsoft.NodejsTools.Debugger {
     class NodeModule {
-        private readonly string _fileName;
+        private readonly ReadOnlyCollection<string> _fileNames;
         private readonly int _id;
         private readonly string _javaScriptFileName;
+        private readonly bool _isMappedModule;
+        private Dictionary<string, object> _documents;
 
-        public NodeModule(int id, string fileName) : this(id, fileName, fileName) {
+        public NodeModule(int id, string fileName) : this(id, new[] { fileName }, fileName) {
         }
 
-        public NodeModule(int id, string fileName, string javaScriptFileName) {
-            Debug.Assert(fileName != null);
+        public NodeModule(int id, string[] fileNames, string javaScriptFileName) {
+            Debug.Assert(javaScriptFileName != null);
+            Debug.Assert(fileNames.Length > 0);
 
             _id = id;
-            _fileName = fileName;
+            _fileNames = new ReadOnlyCollection<string>(fileNames);
             _javaScriptFileName = javaScriptFileName;
+
+            this._documents = new Dictionary<string, object>();
+            this._isMappedModule = fileNames.Length > 1 || fileNames[0] != javaScriptFileName;
         }
 
         public int Id {
@@ -40,10 +48,10 @@ namespace Microsoft.NodejsTools.Debugger {
 
         public string Name {
             get {
-                if (_fileName.IndexOfAny(Path.GetInvalidPathChars()) == -1) {
-                    return Path.GetFileName(_fileName);
+                if (_javaScriptFileName.IndexOfAny(Path.GetInvalidPathChars()) == -1) {
+                    return Path.GetFileName(_javaScriptFileName);
                 }
-                return _fileName;
+                return _javaScriptFileName;
             }
         }
 
@@ -51,8 +59,12 @@ namespace Microsoft.NodejsTools.Debugger {
             get { return _javaScriptFileName; }
         }
 
-        public string FileName {
-            get { return _fileName; }
+        public ReadOnlyCollection<string> FileNames {
+            get { return _fileNames; }
+        }
+
+        public bool IsMappedModule { 
+            get { return this._isMappedModule; } 
         }
 
         public string Source { get; set; }
@@ -60,10 +72,14 @@ namespace Microsoft.NodejsTools.Debugger {
         public bool BuiltIn {
             get {
                 // No directory separator characters implies builtin
-                return (_fileName.IndexOfAny(new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar }) == -1);
+                return (_javaScriptFileName.IndexOfAny(new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar }) == -1);
             }
         }
 
-        public object Document { get; set; }
+        public IDictionary<string, object> Documents {
+            get {
+                return this._documents;
+            }
+        }
     }
 }

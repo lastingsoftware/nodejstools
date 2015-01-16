@@ -288,12 +288,13 @@ namespace Microsoft.NodejsTools.SourceMapping {
         /// <summary>
         /// Maps a location in the source code into the generated code.
         /// </summary>
-        internal bool TryMapPointBack(int lineNo, int columnNo, out SourceMapInfo res) {
+        internal bool TryMapPointBack(int sourceIndex, int lineNo, int columnNo, out SourceMapInfo res) {
             int? firstBestLine = null, secondBestLine = null;
             for (int i = 0; i < _lines.Length; i++) {
                 var line = _lines[i];
                 int? originalColumn = null;
                 foreach (var segment in line.Segments) {
+                    if (segment.SourceIndex != sourceIndex) continue;
                     if (segment.OriginalLine == lineNo) {
                         if (segment.OriginalColumn <= columnNo) {
                             originalColumn = segment.OriginalColumn;
