@@ -890,7 +890,7 @@ namespace Microsoft.NodejsTools.Debugger {
                     NodeStackFrame topFrame = MainThread.TopStackFrame;
                     int currentLine = topFrame.Line;
                     string breakFileName = topFrame.FileName;
-                    NodeModule breakModule = GetModuleForFilePath(breakFileName);
+                    NodeModule breakModule = topFrame.Module;
 
                     var breakpointBindings = new List<NodeBreakpointBinding>();
                     foreach (NodeBreakpointBinding breakpointBinding in _breakpointBindings.Values) {
