@@ -1232,7 +1232,7 @@ namespace Microsoft.NodejsTools.Debugger.DebugEngine {
             }
 
             // For .ts files, we need to build the project to regenerate .js code.
-            if (String.Equals(Path.GetExtension(module.FileName), NodejsConstants.TypeScriptExtension, StringComparison.OrdinalIgnoreCase)) {
+            if (String.Equals(Path.GetExtension(document.FullName), NodejsConstants.TypeScriptExtension, StringComparison.OrdinalIgnoreCase)) {
                 if (document.ProjectItem.ContainingProject.GetNodeProject().Build(null, null) != MSBuildResult.Successful) {
                     var statusBar = (IVsStatusbar)ServiceProvider.GlobalProvider.GetService(typeof(SVsStatusbar));
                     statusBar.SetText(SR.GetString(SR.DebuggerModuleUpdateFailed));

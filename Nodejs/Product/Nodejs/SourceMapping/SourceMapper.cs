@@ -22,6 +22,7 @@ using System.Linq;
 
 using Microsoft.NodejsTools;
 using Microsoft.VisualStudioTools;
+using System.Collections.ObjectModel;
 
 namespace Microsoft.NodejsTools.SourceMapping {
     internal class SourceMapper {
@@ -76,10 +77,10 @@ namespace Microsoft.NodejsTools.SourceMapping {
         /// <returns>The original filename
         ///     null - if the file is not mapped
         /// </returns>
-        internal string MapToOriginal(string filename) {
+        internal ReadOnlyCollection<string> MapToOriginal(string filename) {
             JavaScriptSourceMapInfo mapInfo = TryGetMapInfo(filename);
             if (mapInfo != null && mapInfo.Map != null && mapInfo.Map.Sources.Count > 0) {
-                return mapInfo.Map.Sources[0];
+                return mapInfo.Map.Sources;
             }
             return null;
         }
@@ -110,7 +111,16 @@ namespace Microsoft.NodejsTools.SourceMapping {
             }
             return null;
         }
-
+        
+        private int MapToSourceIndex(ReverseSourceMap sourceMap, string fileName) {
+            for (int i = 0; i < sourceMap.Mapping.Sources.Count; i++) {
+                var path = GetFileRelativeToFile(sourceMap.JavaScriptFile, sourceMap.Mapping.Sources[i]);
+                if (CommonUtils.IsSamePath(path, fileName)) {
+                    return i;
+                }
+            }
+            return -1;
+        }
         /// <summary>
         /// Maps a line number from the original code to the generated JavaScript.
         /// Line numbers are zero based.
@@ -123,7 +133,8 @@ namespace Microsoft.NodejsTools.SourceMapping {
 
             if (sourceMap != null) {
                 SourceMapInfo result;
-                if (sourceMap.Mapping.TryMapPointBack(requestedLineNo, requestedColumnNo, out result)) {
+                int requestedSourceIndex = MapToSourceIndex(sourceMap, requestedFileName);
+                if (requestedSourceIndex != -1 && sourceMap.Mapping.TryMapPointBack(requestedSourceIndex, requestedLineNo, requestedColumnNo, out result)) {
                     lineNo = result.Line;
                     columnNo = result.Column;
 

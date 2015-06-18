@@ -41,7 +41,7 @@ namespace Microsoft.NodejsTools.Debugger.DebugEngine {
                 info.dwValidFields |= enum_MODULE_INFO_FIELDS.MIF_NAME;
             }
             if ((dwFields & enum_MODULE_INFO_FIELDS.MIF_URL) != 0) {
-                info.m_bstrUrl = DebuggedModule.FileName;
+                info.m_bstrUrl = DebuggedModule.JavaScriptFileName;
                 Debug.Assert(info.m_bstrUrl != null);
                 info.dwValidFields |= enum_MODULE_INFO_FIELDS.MIF_URL;
             }

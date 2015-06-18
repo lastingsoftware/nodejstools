@@ -724,10 +724,10 @@ namespace NodejsTests.Debugger {
 
                             // User data
                             var obj = new object();
-                            module.Document = obj;
-                            Assert.AreEqual(obj, module.Document);
-                            module.Document = null;
-                            Assert.AreEqual(null, module.Document);
+                            module.Documents.Add(module.FileNames[0], obj);
+                            Assert.AreEqual(obj, module.Documents[module.FileNames[0]]);
+                            module.Documents[module.FileNames[0]] = null;
+                            Assert.AreEqual(null, module.Documents[module.FileNames[0]]);
 
                             // Download builtin
                             Assert.IsTrue(module.BuiltIn);
@@ -738,7 +738,7 @@ namespace NodejsTests.Debugger {
                             module = thread.Frames[2].Module;
                             Assert.IsFalse(module.BuiltIn);
                             scriptText = await process.GetScriptTextAsync(module.Id);
-                            string fileText = File.ReadAllText(module.FileName);                            
+                            string fileText = File.ReadAllText(module.JavaScriptFileName);                            
                             Assert.IsTrue(scriptText.Contains(fileText));
                         }
                     ),
@@ -1697,7 +1697,7 @@ namespace NodejsTests.Debugger {
                 },
                 onProcessCreated: newProcess => {
                     newProcess.ModuleLoaded += (sender, args) => {
-                        receivedFilenames.Add(args.Module.FileName);
+                        receivedFilenames.Add(args.Module.JavaScriptFileName);
                     };
                 }
             );

@@ -76,7 +76,7 @@ namespace NodejsTests.Debugger.Commands {
             NodeModule module = scriptsCommand.Modules[0];
             Assert.AreEqual(nodejs, module.Name);
             Assert.AreEqual(nodejs, module.Source);
-            Assert.AreEqual(nodejs, module.FileName);
+            Assert.AreEqual(nodejs, module.FileNames[0]);
             Assert.AreEqual(nodejs, module.JavaScriptFileName);
             Assert.AreEqual(17, module.Id);
         }
