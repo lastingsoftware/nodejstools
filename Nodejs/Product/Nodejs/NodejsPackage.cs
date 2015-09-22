@@ -36,7 +36,9 @@ using Microsoft.NodejsTools.Jade;
 using Microsoft.NodejsTools.Logging;
 using Microsoft.NodejsTools.Options;
 using Microsoft.NodejsTools.Project;
+using Microsoft.NodejsTools.ProjectWizard;
 using Microsoft.NodejsTools.Repl;
+using Microsoft.NodejsTools.Telemetry;
 using Microsoft.VisualStudio;
 using Microsoft.VisualStudio.ComponentModelHost;
 using Microsoft.VisualStudio.Debugger.Interop;
@@ -95,6 +97,8 @@ namespace Microsoft.NodejsTools {
     [ProvideLanguageEditorOptionPage(typeof(NodejsFormattingGeneralOptionsPage), NodejsConstants.Nodejs, "Formatting", "General", "3044")]
     [ProvideLanguageEditorOptionPage(typeof(NodejsIntellisenseOptionsPage), NodejsConstants.Nodejs, "IntelliSense", "", "3048")]
     [ProvideLanguageEditorOptionPage(typeof(NodejsAdvancedEditorOptionsPage), NodejsConstants.Nodejs, "Advanced", "", "3050")]
+    [ProvideCodeExpansions(Guids.NodejsLanguageInfoString, false, 106, "Nodejs", @"Snippets\%LCID%\SnippetsIndex.xml", @"Snippets\%LCID%\Nodejs\")]
+    [ProvideCodeExpansionPath("Nodejs", "Test", @"Snippets\%LCID%\Test\")]
     internal sealed partial class NodejsPackage : CommonPackage {
         internal const string NodeExpressionEvaluatorGuid = "{F16F2A71-1C45-4BAB-BECE-09D28CFDE3E6}";
         private IContentType _contentType;
@@ -106,6 +110,10 @@ namespace Microsoft.NodejsTools {
         private LanguagePreferences _langPrefs;
         internal VsProjectAnalyzer _analyzer;
         private NodejsToolsLogger _logger;
+        private ITelemetryLogger _telemetryLogger;
+        // Hold references for the subscribed events. Otherwise the callbacks will be garbage collected
+        // after the initialization
+        private List<EnvDTE.CommandEvents> _subscribedCommandEvents = new List<EnvDTE.CommandEvents>();
 
         /// <summary>
         /// Default constructor of the package.
@@ -162,6 +170,12 @@ namespace Microsoft.NodejsTools {
             }
         }
 
+        public NodejsDiagnosticsOptionsPage DiagnosticsOptionsPage {
+            get {
+                return (NodejsDiagnosticsOptionsPage)GetDialogPage(typeof(NodejsDiagnosticsOptionsPage));
+            }
+        }
+
         public EnvDTE.DTE DTE {
             get {
                 return (EnvDTE.DTE)GetService(typeof(EnvDTE.DTE));
@@ -180,7 +194,13 @@ namespace Microsoft.NodejsTools {
             Debug.WriteLine(string.Format(CultureInfo.CurrentCulture, "Entering Initialize() of: {0}", this.ToString()));
             base.Initialize();
 
-            var langService = new NodejsLanguageInfo(this);
+            SubscribeToVsCommandEvents(
+                (int)VSConstants.VSStd97CmdID.AddNewProject,
+                delegate { NewProjectFromExistingWizard.IsAddNewProjectCmd = true; },
+                delegate { NewProjectFromExistingWizard.IsAddNewProjectCmd = false; }
+            );
+
+             var langService = new NodejsLanguageInfo(this);
             ((IServiceContainer)this).AddService(langService.GetType(), langService, true);
 
             ((IServiceContainer)this).AddService(typeof(ClipboardServiceBase), new ClipboardService(), true);
@@ -228,11 +248,29 @@ namespace Microsoft.NodejsTools {
             IntellisenseOptionsPage.AnalysisLogMaximumChanged += IntellisenseOptionsPage_AnalysisLogMaximumChanged;
 
             InitializeLogging();
-            
+
+            InitializeTelemetry();
+
             // The variable is inherited by child processes backing Test Explorer, and is used in
             // the NTVS test discoverer and test executor to connect back to VS.
             Environment.SetEnvironmentVariable(NodejsConstants.NodeToolsProcessIdEnvironmentVariable, Process.GetCurrentProcess().Id.ToString());
         }
+
+        private void SubscribeToVsCommandEvents(
+            int eventId, 
+            EnvDTE._dispCommandEvents_BeforeExecuteEventHandler beforeExecute = null,
+            EnvDTE._dispCommandEvents_AfterExecuteEventHandler afterExecute = null) {
+            var commandEventGuid = typeof(VSConstants.VSStd97CmdID).GUID.ToString("B");
+            var targetEvent = DTE.Events.CommandEvents[commandEventGuid, eventId];
+            if (beforeExecute != null) {
+                targetEvent.BeforeExecute += beforeExecute;
+            }
+            if (afterExecute != null) {
+                targetEvent.AfterExecute += afterExecute;
+            }
+            _subscribedCommandEvents.Add(targetEvent);
+        }
+
 
         private void IntellisenseOptionsPage_AnalysisLogMaximumChanged(object sender, EventArgs e) {
             if (_analyzer != null) {
@@ -248,6 +286,15 @@ namespace Microsoft.NodejsTools {
             _logger.LogEvent(NodejsToolsLogEvent.AnalysisLevel, IntellisenseOptionsPage.AnalysisLevel);
         }
 
+        private void InitializeTelemetry() {
+            var thisAssembly = typeof(NodejsPackage).Assembly;
+
+            // Get telemetry logger
+            _telemetryLogger = TelemetrySetup.Instance.GetLogger(thisAssembly);
+
+            TelemetrySetup.Instance.LogPackageLoad(_telemetryLogger, Guid.Parse(Guids.NodejsPackageString), thisAssembly, Application.ProductVersion);
+        }
+
         public new IComponentModel ComponentModel {
             get {
                 return this.GetComponentModel();
@@ -257,6 +304,12 @@ namespace Microsoft.NodejsTools {
         internal NodejsToolsLogger Logger {
             get {
                 return _logger;
+            }
+        }
+
+        internal ITelemetryLogger TelemetryLogger {
+            get {
+                return _telemetryLogger;
             }
         }
 

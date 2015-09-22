@@ -131,6 +131,7 @@ namespace AnalysisTests {
             List<AnalysisFile> files = new List<AnalysisFile>();
             foreach (var file in Directory.GetFiles(directory, "*", SearchOption.AllDirectories)) {
                 if (String.Equals(Path.GetExtension(file), ".js", StringComparison.OrdinalIgnoreCase)) {
+                    var relativeFile = file.Substring(directory.Length);
                     files.Add(new AnalysisFile(file, File.ReadAllText(file)));
                 } else if (String.Equals(Path.GetFileName(file), "package.json", StringComparison.OrdinalIgnoreCase)) {
                     JavaScriptSerializer serializer = new JavaScriptSerializer();

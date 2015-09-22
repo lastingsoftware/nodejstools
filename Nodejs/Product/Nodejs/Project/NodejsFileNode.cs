@@ -15,10 +15,7 @@
 //*********************************************************//
 
 using System;
-using System.Diagnostics;
 using System.IO;
-using Microsoft.VisualStudio;
-using Microsoft.VisualStudioTools;
 using Microsoft.VisualStudioTools.Project;
 #if DEV14_OR_LATER
 using Microsoft.VisualStudio.Imaging.Interop;
@@ -31,16 +28,21 @@ namespace Microsoft.NodejsTools.Project {
 
         public NodejsFileNode(NodejsProjectNode root, ProjectElement e)
             : base(root, e) {
-            string referenceBaseName = Path.GetFileNameWithoutExtension(Caption);
-
 #if FALSE
             CreateWatcher(Url);
 #endif
-            if (ShouldAnalyze) {
-                root.Analyzer.AnalyzeFile(Url, !IsNonMemberItem);
-                root._requireCompletionCache.Clear();
+            if (Url.Contains(AnalysisConstants.NodeModulesFolder)) {
+                root.DelayedAnalysisQueue.Enqueue(this);
+            } else {
+                Analyze();
             }
+        }
 
+        internal void Analyze() {
+            if (ProjectMgr != null && ProjectMgr.Analyzer != null && ShouldAnalyze) {
+                ProjectMgr.Analyzer.AnalyzeFile(Url, !IsNonMemberItem);
+                ProjectMgr._requireCompletionCache.Clear();
+            }
             ItemNode.ItemTypeChanged += ItemNode_ItemTypeChanged;
         }
 
@@ -48,8 +50,9 @@ namespace Microsoft.NodejsTools.Project {
             get {
                 // We analyze if we are a member item or the file is included
                 // Also, it should either be marked as compile or not have an item type name (value is null for node_modules
-                return (!IsNonMemberItem || ProjectMgr.IncludeNodejsFile(this))
-                    && (ItemNode.ItemTypeName == ProjectFileConstants.Compile || string.IsNullOrEmpty(ItemNode.ItemTypeName));
+                return !ProjectMgr.DelayedAnalysisQueue.Contains(this) &&
+                    (!IsNonMemberItem || ProjectMgr.IncludeNodejsFile(this)) &&
+                    (ItemNode.ItemTypeName == ProjectFileConstants.Compile || string.IsNullOrEmpty(ItemNode.ItemTypeName));
 
             }
         }
@@ -63,16 +66,42 @@ namespace Microsoft.NodejsTools.Project {
 #endif
 
         internal override int IncludeInProject(bool includeChildren) {
-            // On an include, a file is marked as Compile.  There is no reason to check whether to Analyze.  We should.
-            ProjectMgr.Analyzer.AnalyzeFile(Url, true);
-            return base.IncludeInProject(includeChildren);
+            // Check if parent folder is designated as containing client-side code.
+            var isContent = false;
+            var folderNode = this.Parent as NodejsFolderNode;
+            if (folderNode != null) {
+                var contentType = folderNode.ContentType;
+                switch (contentType) {
+                    case FolderContentType.Browser:
+                        isContent = true;
+                        break;
+                }
+            }
+
+            var includeInProject = base.IncludeInProject(includeChildren);
+            
+            if (isContent && Url.EndsWith(".js", StringComparison.OrdinalIgnoreCase)) {
+                this.ItemNode.ItemTypeName = ProjectFileConstants.Content;
+            }
+            
+            ProjectMgr.Analyzer.AnalyzeFile(Url, ShouldAnalyze);
+            
+            UpdateParentContentType();
+            ItemNode.ItemTypeChanged += ItemNode_ItemTypeChanged;
+
+            return includeInProject;
         }
 
         internal override int ExcludeFromProject() {
             // Analyze on removing from a project so we have the most up to date sources for this.
             // Don't report errors since the file won't remain part of the project. This removes the errors from the list.
             ProjectMgr.Analyzer.AnalyzeFile(Url, false);
-            return base.ExcludeFromProject();
+            var excludeFromProject = base.ExcludeFromProject();
+            
+            UpdateParentContentType();
+            ItemNode.ItemTypeChanged -= ItemNode_ItemTypeChanged;
+            
+            return excludeFromProject;
         }
 
         protected override void RaiseOnItemRemoved(string documentToRemove, string[] filesToBeDeleted) {
@@ -88,7 +117,7 @@ namespace Microsoft.NodejsTools.Project {
             base.RenameChildNodes(parentNode);
             this.ProjectMgr.Analyzer.ReloadComplete();
         }
-
+        
         protected override NodeProperties CreatePropertiesObject() {
             if (IsLinkFile) {
                 return new NodejsLinkFileNodeProperties(this);
@@ -99,47 +128,19 @@ namespace Microsoft.NodejsTools.Project {
             return new NodejsIncludedFileNodeProperties(this);
         }
 
-        internal override int ExecCommandOnNode(Guid guidCmdGroup, uint cmd, uint nCmdexecopt, IntPtr pvaIn, IntPtr pvaOut) {
-            Debug.Assert(this.ProjectMgr != null, "The Dynamic FileNode has no project manager");
-
-            Utilities.CheckNotNull(this.ProjectMgr);
-            if (guidCmdGroup == Guids.NodejsCmdSet) {
-                switch (cmd) {
-                    case PkgCmdId.cmdidSetAsNodejsStartupFile:
-                        // Set the StartupFile project property to the Url of this node
-                        ProjectMgr.SetProjectProperty(
-                            CommonConstants.StartupFile,
-                            CommonUtils.GetRelativeFilePath(this.ProjectMgr.ProjectHome, Url)
-                        );
-                        return VSConstants.S_OK;
-                }
-            }
-
-            return base.ExecCommandOnNode(guidCmdGroup, cmd, nCmdexecopt, pvaIn, pvaOut);
-        }
-
-        internal override int QueryStatusOnNode(Guid guidCmdGroup, uint cmd, IntPtr pCmdText, ref QueryStatusResult result) {
-            if (guidCmdGroup == Guids.NodejsCmdSet) {
-                if (this.ProjectMgr.IsCodeFile(this.Url)) {
-                    switch (cmd) {
-                        case PkgCmdId.cmdidSetAsNodejsStartupFile:
-                            //We enable "Set as StartUp File" command only on current language code files, 
-                            //the file is in project home dir and if the file is not the startup file already.
-                            string startupFile = ((CommonProjectNode)ProjectMgr).GetStartupFile();
-                            if (!CommonUtils.IsSamePath(startupFile, this.Url)) {
-                                result |= QueryStatusResult.SUPPORTED | QueryStatusResult.ENABLED;
-                            }
-                            return VSConstants.S_OK;
-                    }
-                }
-            }
-            return base.QueryStatusOnNode(guidCmdGroup, cmd, pCmdText, ref result);
-        }
-
         private void ItemNode_ItemTypeChanged(object sender, EventArgs e) {
             // item type node was changed...
             // if we have changed the type from compile to anything else, we should scrub
             ProjectMgr.Analyzer.AnalyzeFile(Url, ShouldAnalyze);
+
+            UpdateParentContentType();
+        }
+        
+        private void UpdateParentContentType() {
+            var parent = this.Parent as NodejsFolderNode;
+            if (parent != null) {
+                parent.UpdateContentType();
+            }
         }
 
         private void CloseWatcher() {
@@ -199,13 +200,14 @@ namespace Microsoft.NodejsTools.Project {
         }
 
         public override void Remove(bool removeFromStorage) {
+            ItemNode.ItemTypeChanged -= ItemNode_ItemTypeChanged;
             base.Remove(removeFromStorage);
             CloseWatcher();
         }
 
         public override void Close() {
+            ItemNode.ItemTypeChanged -= ItemNode_ItemTypeChanged;
             base.Close();
-
             CloseWatcher();
         }
     }

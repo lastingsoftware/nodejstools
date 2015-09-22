@@ -23,6 +23,7 @@ namespace Microsoft.NodejsTools.Options {
     public partial class NodejsIntellisenseOptionsControl : UserControl {
         public NodejsIntellisenseOptionsControl() {
             InitializeComponent();
+            _previewIntelliSenseRadioButton.Enabled = NodejsPackage.Instance.IntellisenseOptionsPage.EnableES6Preview;
         }
 
         internal bool SaveToDisk {
@@ -40,16 +41,26 @@ namespace Microsoft.NodejsTools.Options {
 
         internal AnalysisLevel AnalysisLevel {
             get {
-                if (_fullIntelliSenseRadioButton.Checked) {
+                if (_previewIntelliSenseRadioButton.Checked) {
+                    return AnalysisLevel.Preview;
+                } else if (_fullIntelliSenseRadioButton.Checked) {
                     return AnalysisLevel.High;
+                } else if (_mediumIntelliSenseRadioButton.Checked) {
+                    return AnalysisLevel.Medium;
                 } else {
                     return AnalysisLevel.None;
                 }
             }
             set {
                 switch (value) {
+                    case AnalysisLevel.Preview:
+                        _previewIntelliSenseRadioButton.Checked = true;
+                        break;
                     case AnalysisLevel.High:
                         _fullIntelliSenseRadioButton.Checked = true;
+                        break;
+                    case AnalysisLevel.Medium:
+                        _mediumIntelliSenseRadioButton.Checked = true;
                         break;
                     case AnalysisLevel.None:
                         _noIntelliSenseRadioButton.Checked = true;
@@ -91,27 +102,42 @@ namespace Microsoft.NodejsTools.Options {
             }
         }
 
-        internal string CompletionCommittedBy {
+        internal bool OnlyTabOrEnterToCommit {
             get {
-                return _completionCommittedBy.Text;
+                return _onlyTabOrEnterToCommit.Checked;
             }
             set {
-                _completionCommittedBy.Text = value;
+                _onlyTabOrEnterToCommit.Checked = value;
+            }
+        }
+
+        internal bool ShowCompletionListAfterCharacterTyped {
+            get {
+                return _showCompletionListAfterCharacterTyped.Checked;
+            }
+            set {
+                _showCompletionListAfterCharacterTyped.Checked = value;
             }
         }
 
         internal void SyncPageWithControlSettings(NodejsIntellisenseOptionsPage page) {
             page.AnalysisLevel = AnalysisLevel;
             page.AnalysisLogMax = AnalysisLogMaximum;
-            page.CompletionCommittedBy = CompletionCommittedBy;
             page.SaveToDisk = SaveToDisk;
+            page.OnlyTabOrEnterToCommit = OnlyTabOrEnterToCommit;
+            page.ShowCompletionListAfterCharacterTyped = ShowCompletionListAfterCharacterTyped;
         }
 
         internal void SyncControlWithPageSettings(NodejsIntellisenseOptionsPage page) {
             AnalysisLevel = page.AnalysisLevel;
             AnalysisLogMaximum = page.AnalysisLogMax;
-            CompletionCommittedBy = page.CompletionCommittedBy;
             SaveToDisk = page.SaveToDisk;
+            OnlyTabOrEnterToCommit = page.OnlyTabOrEnterToCommit;
+            ShowCompletionListAfterCharacterTyped = page.ShowCompletionListAfterCharacterTyped;
+        }
+
+        private void _analysisPreviewFeedbackLinkLabel_LinkClicked(object sender, LinkLabelLinkClickedEventArgs e) {
+            Process.Start("http://aka.ms/NtvsEs6Preview");
         }
     }
 }

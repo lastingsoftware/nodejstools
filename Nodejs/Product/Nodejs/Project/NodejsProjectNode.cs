@@ -22,11 +22,13 @@ using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Text.RegularExpressions;
+using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.NodejsTools.Intellisense;
 using Microsoft.NodejsTools.Npm;
 using Microsoft.NodejsTools.ProjectWizard;
 using Microsoft.VisualStudio;
+using Microsoft.VisualStudio.Shell.Interop;
 using Microsoft.VisualStudioTools;
 using Microsoft.VisualStudioTools.Project;
 using Microsoft.VisualStudioTools.Project.Automation;
@@ -38,16 +40,23 @@ using Microsoft.VisualStudio.Imaging;
 #endif
 
 namespace Microsoft.NodejsTools.Project {
-    class NodejsProjectNode : CommonProjectNode, VsWebSite.VSWebSite, INodePackageModulesCommands {
+    class NodejsProjectNode : CommonProjectNode, VsWebSite.VSWebSite, INodePackageModulesCommands, IVsBuildPropertyStorage {
         private VsProjectAnalyzer _analyzer;
         private readonly HashSet<string> _warningFiles = new HashSet<string>();
         private readonly HashSet<string> _errorFiles = new HashSet<string>();
-        private string[] _analysisIgnoredDirs = new string[0];
+        private string[] _analysisIgnoredDirs = new string[1] { NodejsConstants.NodeModulesStagingFolder };
         private int _maxFileSize = 1024 * 512;
         internal readonly RequireCompletionCache _requireCompletionCache = new RequireCompletionCache();
         private string _intermediateOutputPath;
         private readonly Dictionary<NodejsProjectImageName, int> _imageIndexFromNameDictionary = new Dictionary<NodejsProjectImageName, int>();
 
+        // We delay analysis until things calm down in the node_modules folder.
+        internal Queue<NodejsFileNode> DelayedAnalysisQueue = new Queue<NodejsFileNode>();
+        private FileWatcher _nodeModulesWatcher;
+        private readonly string[] _watcherExtensions = { ".js", ".json" };
+        private object _idleNodeModulesLock = new object();
+        private volatile bool _isIdleNodeModules = false;
+        private Timer _idleNodeModulesTimer;
 
         public NodejsProjectNode(NodejsProjectPackage package)
             : base(
@@ -57,8 +66,7 @@ namespace Microsoft.NodejsTools.Project {
 #else
                   Utilities.GetImageList(typeof(NodejsProjectNode).Assembly.GetManifestResourceStream("Microsoft.NodejsTools.Resources.Icons.NodejsImageList.bmp"))
 #endif
-        )
-        {
+        ) {
             Type projectNodePropsType = typeof(NodejsProjectNodeProperties);
             AddCATIDMapping(projectNodePropsType, projectNodePropsType.GUID);
 #pragma warning disable 0612
@@ -71,6 +79,73 @@ namespace Microsoft.NodejsTools.Project {
             get {
                 return _analyzer;
             }
+        }
+
+        private void CreateIdleNodeModulesWatcher() {
+            try {
+                _idleNodeModulesTimer = new Timer(OnIdleNodeModules);
+
+                // This handles the case where there are multiple node_modules folders in a project.
+                _nodeModulesWatcher = new FileWatcher(ProjectHome) {
+                    IncludeSubdirectories = true,
+                    NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.CreationTime,
+                    EnableRaisingEvents = true
+                };
+
+                _nodeModulesWatcher.Changed += OnNodeModulesWatcherChanged;
+                _nodeModulesWatcher.Created += OnNodeModulesWatcherChanged;
+                _nodeModulesWatcher.Deleted += OnNodeModulesWatcherChanged;
+
+                RestartFileSystemWatcherTimer();
+            } catch (Exception ex) {
+                if (_nodeModulesWatcher != null) {
+                    _nodeModulesWatcher.Dispose();
+                }
+
+                if (ex is IOException || ex is ArgumentException) {
+                    Debug.WriteLine("Error starting FileWatcher:\r\n{0}", ex);
+                } else {
+                    throw;
+                }
+            }
+        }
+
+        private void OnIdleNodeModules(object state) {
+            lock (_idleNodeModulesLock) {
+                _isIdleNodeModules = true;
+            }
+
+            while (DelayedAnalysisQueue.Count > 0) {
+                lock (_idleNodeModulesLock) {
+                    if (!_isIdleNodeModules) {
+                        return;
+                    }
+                }
+                var fileNode = DelayedAnalysisQueue.Dequeue();
+                fileNode.Analyze();
+            }
+        }
+
+        private void OnNodeModulesWatcherChanged(object sender, FileSystemEventArgs e) {
+            try {
+                var extension = Path.GetExtension(e.FullPath);
+                if (e.FullPath.Contains(NodejsConstants.NodeModulesFolder) && _watcherExtensions.Any(extension.Equals)) {
+                    RestartFileSystemWatcherTimer();
+                }
+            } catch (ArgumentException) {
+                // Occurs for invalid characters in the filepath. Don't bother restarting the idle timer.
+            }
+        }
+
+        private void RestartFileSystemWatcherTimer() {
+            lock (_idleNodeModulesLock) {
+                _isIdleNodeModules = false;
+            }
+
+            // The cooldown time here is longer than the cooldown time we use in NpmController.
+            // This gives the Npm component ample time to build up the npm node tree,
+            // so that we can query it later for perf optimizations.
+            _idleNodeModulesTimer.Change(3000, Timeout.Infinite);
         }
 
         private static string[] _excludedAvailableItems = new[] {
@@ -208,6 +283,16 @@ namespace Microsoft.NodejsTools.Project {
         }
 
         internal override string GetItemType(string filename) {
+            string absFileName =
+                Path.IsPathRooted(filename) ?
+                filename :
+                Path.Combine(this.ProjectHome, filename);
+
+            var node = this.FindNodeByFullPath(absFileName) as NodejsFileNode;
+            if (node != null && node.ItemNode.ItemTypeName != null) {
+                return node.ItemNode.ItemTypeName;
+            }
+
             if (string.Equals(Path.GetExtension(filename), NodejsConstants.TypeScriptExtension, StringComparison.OrdinalIgnoreCase)) {
                 return NodejsConstants.TypeScriptCompileItemType;
             }
@@ -266,7 +351,8 @@ namespace Microsoft.NodejsTools.Project {
 
         public override CommonFileNode CreateNonCodeFileNode(ProjectElement item) {
             string fileName = item.Url;
-            if (Path.GetFileName(fileName).Equals(NodejsConstants.PackageJsonFile, StringComparison.OrdinalIgnoreCase)) {
+            if (Path.GetFileName(fileName).Equals(NodejsConstants.PackageJsonFile, StringComparison.OrdinalIgnoreCase) && 
+                !fileName.Contains(NodejsConstants.NodeModulesStagingFolder)) {
                 return new PackageJsonFileNode(this, item);
             }
 
@@ -326,6 +412,25 @@ namespace Microsoft.NodejsTools.Project {
             return new NodejsProjectNodeProperties(this);
         }
 
+        public override int GetPropertyValue(string propertyName, string configName, uint storage, out string propertyValue) {
+            propertyValue = null;
+            switch (propertyName) {
+                case "DockerLinuxDockerfileContents":
+                    propertyValue = DockerfileWizardExtension.GetDockerfileWithReplacements(
+                        File.ReadAllText(@"FileTemplates\ReferenceFiles\Dockerfile"),
+                        DTE
+                    );
+                    return VSConstants.S_OK;
+                case "DockerAppType":
+                    propertyValue = "Node.js";
+                    return VSConstants.S_OK;
+                case "DockerDefaultPublishContainerPort":
+                    propertyValue = "8080";
+                    return VSConstants.S_OK;
+            }
+            return base.GetPropertyValue(propertyName, configName, storage, out propertyValue);
+        }
+
         protected override Stream ProjectIconsImageStripStream {
             get {
                 return typeof(ProjectNode).Assembly.GetManifestResourceStream("Microsoft.VisualStudioTools.Resources.Icons.SharedProjectImageList.bmp");
@@ -335,22 +440,24 @@ namespace Microsoft.NodejsTools.Project {
         public override bool IsCodeFile(string fileName) {
             var ext = Path.GetExtension(fileName);
             return ext.Equals(NodejsConstants.JavaScriptExtension, StringComparison.OrdinalIgnoreCase) ||
-                   ext.Equals(NodejsConstants.TypeScriptExtension, StringComparison.OrdinalIgnoreCase) ||
-                   // for some reason, the default express 4 template's startup file lacks an extension.
-                   string.IsNullOrEmpty(ext);
+                   ext.Equals(NodejsConstants.TypeScriptExtension, StringComparison.OrdinalIgnoreCase);
         }
 
         public override int InitializeForOuter(string filename, string location, string name, uint flags, ref Guid iid, out IntPtr projectPointer, out int canceled) {
             NodejsPackage.Instance.IntellisenseOptionsPage.AnalysisLevelChanged += IntellisenseOptionsPageAnalysisLevelChanged;
             NodejsPackage.Instance.IntellisenseOptionsPage.AnalysisLogMaximumChanged += AnalysisLogMaximumChanged;
             NodejsPackage.Instance.IntellisenseOptionsPage.SaveToDiskChanged += IntellisenseOptionsPageSaveToDiskChanged;
+            NodejsPackage.Instance.GeneralOptionsPage.ShowBrowserAndNodeLabelsChanged += ShowBrowserAndNodeLabelsChanged;
 
             return base.InitializeForOuter(filename, location, name, flags, ref iid, out projectPointer, out canceled);
         }
 
         protected override void Reload() {
             using (new DebugTimer("Project Load")) {
-                _intermediateOutputPath = Path.Combine(ProjectHome, GetProjectProperty("BaseIntermediateOutputPath"));
+                // Populate values from project properties before we do anything else.
+                // Otherwise we run into race conditions where, for instance, _analysisIgnoredDirectories
+                // is not properly set before the FileNodes get created in base.Reload()
+                UpdateProjectNodeFromProjectProperties();
 
                 if (_analyzer != null && _analyzer.RemoveUser()) {
                     _analyzer.Dispose();
@@ -369,20 +476,22 @@ namespace Microsoft.NodejsTools.Project {
                 // scan for files which were loaded from cached analysis but no longer
                 // exist and remove them.
                 _analyzer.ReloadComplete();
+            }
+        }
 
-                var ignoredPaths = GetProjectProperty(NodejsConstants.AnalysisIgnoredDirectories);
+        private void UpdateProjectNodeFromProjectProperties() {
+            _intermediateOutputPath = Path.Combine(ProjectHome, GetProjectProperty("BaseIntermediateOutputPath"));
 
-                if (!string.IsNullOrWhiteSpace(ignoredPaths)) {
-                    _analysisIgnoredDirs = ignoredPaths.Split(';').Select(x => '\\' + x + '\\').ToArray();
-                } else {
-                    _analysisIgnoredDirs = new string[0];
-                }
+            var ignoredPaths = GetProjectProperty(NodejsConstants.AnalysisIgnoredDirectories);
 
-                var maxFileSizeProp = GetProjectProperty(NodejsConstants.AnalysisMaxFileSize);
-                int maxFileSize;
-                if (maxFileSizeProp != null && Int32.TryParse(maxFileSizeProp, out maxFileSize)) {
-                    _maxFileSize = maxFileSize;
-                }
+            if (!string.IsNullOrWhiteSpace(ignoredPaths)) {
+                _analysisIgnoredDirs = _analysisIgnoredDirs.Append(ignoredPaths.Split(';').Select(x => '\\' + x + '\\').ToArray());
+            }
+
+            var maxFileSizeProp = GetProjectProperty(NodejsConstants.AnalysisMaxFileSize);
+            int maxFileSize;
+            if (maxFileSizeProp != null && Int32.TryParse(maxFileSizeProp, out maxFileSize)) {
+                _maxFileSize = maxFileSize;
             }
         }
 
@@ -446,6 +555,13 @@ namespace Microsoft.NodejsTools.Project {
         private void IntellisenseOptionsPageSaveToDiskChanged(object sender, EventArgs e) {
             if (_analyzer != null) {
                 _analyzer.SaveToDisk = NodejsPackage.Instance.IntellisenseOptionsPage.SaveToDisk;
+            }
+        }
+
+        private void ShowBrowserAndNodeLabelsChanged(object sender, EventArgs e) {
+            var nodejsFolderNodes = this.AllDescendants.Where(item => (item as NodejsFolderNode) != null).Select(item => (NodejsFolderNode)item);
+            foreach (var node in nodejsFolderNodes) {
+                ProjectMgr.ReDrawNode(node, UIHierarchyElement.Caption);
             }
         }
 
@@ -528,15 +644,29 @@ namespace Microsoft.NodejsTools.Project {
             if (CommonUtils.IsSubpathOf(_intermediateOutputPath, fileNode.Url)) {
                 return false;
             }
+
             foreach (var path in _analysisIgnoredDirs) {
                 if (url.IndexOf(path, 0, StringComparison.OrdinalIgnoreCase) != -1) {
                     return false;
                 }
             }
-            if (new FileInfo(fileNode.Url).Length > _maxFileSize) {
-                // skip obviously generated files...
+
+            var fileInfo = new FileInfo(fileNode.Url);
+            if (!fileInfo.Exists || fileInfo.Length > _maxFileSize) {
+                // skip obviously generated and missing files...
                 return false;
             }
+
+            int nestedModulesDepth = 0;
+            if (ModulesNode.NpmController.RootPackage != null && ModulesNode.NpmController.RootPackage.Modules != null) {
+                nestedModulesDepth = ModulesNode.NpmController.RootPackage.Modules.GetDepth(fileNode.Url);
+            }
+
+            if (_analyzer != null && _analyzer.Project != null &&
+                _analyzer.Project.Limits.IsPathExceedNestingLimit(nestedModulesDepth)) {
+                return false;
+            }
+
             return true;
         }
 
@@ -560,10 +690,11 @@ namespace Microsoft.NodejsTools.Project {
             if (null == ModulesNode) {
                 ModulesNode = new NodeModulesNode(this);
                 AddChild(ModulesNode);
+                CreateIdleNodeModulesWatcher();
             }
         }
 
-#region VSWebSite Members
+        #region VSWebSite Members
 
         // This interface is just implemented so we don't get normal profiling which
         // doesn't work with our projects anyway.
@@ -630,7 +761,7 @@ namespace Microsoft.NodejsTools.Project {
             get { throw new NotImplementedException(); }
         }
 
-#endregion
+        #endregion
 
         Task INodePackageModulesCommands.InstallMissingModulesAsync() {
             //Fire off the command to update the missing modules
@@ -746,7 +877,7 @@ namespace Microsoft.NodejsTools.Project {
                     }
                 };
 
-            recheck:
+                recheck:
 
                 var longPaths = await Task.Factory.StartNew(() =>
                     GetLongSubPaths(ProjectHome)
@@ -891,7 +1022,21 @@ namespace Microsoft.NodejsTools.Project {
                         }
                         return QueryStatusResult.SUPPORTED | QueryStatusResult.ENABLED;
                 }
+            } else if (cmdGroup == Guids.NodejsCmdSet) {
+                switch (cmd) {
+                    case PkgCmdId.cmdidSetAsNodejsStartupFile:
+                        if (ShowSetAsStartupFileCommandOnNode(selectedNodes)) {
+                            // We enable "Set as StartUp File" command only on current language code files, 
+                            // the file is in project home dir and if the file is not the startup file already.
+                            string startupFile = ((CommonProjectNode)ProjectMgr).GetStartupFile();
+                            if (!CommonUtils.IsSamePath(startupFile, selectedNodes[0].Url)) {
+                                return QueryStatusResult.SUPPORTED | QueryStatusResult.ENABLED;
+                            }
+                        }
+                        break;
+                }
             }
+
             return base.QueryStatusSelectionOnNodes(selectedNodes, cmdGroup, cmd, pCmdText);
         }
 
@@ -904,7 +1049,11 @@ namespace Microsoft.NodejsTools.Project {
                 }
             } else if (cmdGroup == Guids.NodejsNpmCmdSet) {
                 try {
-                    NpmHelpers.GetPathToNpm(this.Project.GetNodejsProject().GetProjectProperty(NodejsConstants.NodeExePath));
+                    NpmHelpers.GetPathToNpm(
+                        Nodejs.GetAbsoluteNodeExePath(
+                            ProjectHome,
+                            Project.GetNodejsProject().GetProjectProperty(NodejsConstants.NodeExePath)
+                    ));
                 } catch (NpmNotFoundException) {
                     Nodejs.ShowNodejsNotInstalled();
                     return VSConstants.S_OK;
@@ -916,7 +1065,11 @@ namespace Microsoft.NodejsTools.Project {
         protected override int ExecCommandThatDependsOnSelectedNodes(Guid cmdGroup, uint cmdId, uint cmdExecOpt, IntPtr vaIn, IntPtr vaOut, CommandOrigin commandOrigin, IList<HierarchyNode> selectedNodes, out bool handled) {
             if (cmdGroup == Guids.NodejsNpmCmdSet) {
                 try {
-                    NpmHelpers.GetPathToNpm(this.Project.GetNodejsProject().GetProjectProperty(NodejsConstants.NodeExePath));
+                    NpmHelpers.GetPathToNpm(
+                        Nodejs.GetAbsoluteNodeExePath(
+                            ProjectHome,
+                            Project.GetNodejsProject().GetProjectProperty(NodejsConstants.NodeExePath)
+                    ));
                 } catch (NpmNotFoundException) {
                     Nodejs.ShowNodejsNotInstalled();
                     handled = true;
@@ -940,8 +1093,28 @@ namespace Microsoft.NodejsTools.Project {
                         }
                         break;
                 }
+            } else if (cmdGroup == Guids.NodejsCmdSet) {
+                switch (cmdId) {
+                    case PkgCmdId.cmdidSetAsNodejsStartupFile:
+                        // Set the StartupFile project property to the Url of this node
+                        SetProjectProperty(
+                            CommonConstants.StartupFile,
+                            CommonUtils.GetRelativeFilePath(ProjectHome, selectedNodes[0].Url)
+                        );
+                        handled = true;
+                        return VSConstants.S_OK;
+                }
             }
+
             return base.ExecCommandThatDependsOnSelectedNodes(cmdGroup, cmdId, cmdExecOpt, vaIn, vaOut, commandOrigin, selectedNodes, out handled);
+        }
+
+        private bool ShowSetAsStartupFileCommandOnNode(IList<HierarchyNode> selectedNodes) {
+            var selectedNodeUrl = selectedNodes[0].Url;
+            return selectedNodes.Count == 1 &&
+                (IsCodeFile(selectedNodeUrl) ||
+                // for some reason, the default express 4 template's startup file lacks an extension.
+                string.IsNullOrEmpty(Path.GetExtension(selectedNodeUrl)));
         }
 
         private static bool ShowManageModulesCommandOnNode(IList<HierarchyNode> selectedNodes) {

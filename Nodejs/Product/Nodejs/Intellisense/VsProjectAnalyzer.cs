@@ -91,6 +91,9 @@ namespace Microsoft.NodejsTools.Intellisense {
 
         private readonly TaskProvider _defaultTaskProvider = CreateDefaultTaskProvider();
 
+        internal static readonly string[] _emptyCompletionContextKeywords = new string[] {
+            "var", "function", "const", "let"
+        };
 #if FALSE
         private readonly UnresolvedImportSquiggleProvider _unresolvedSquiggles;
 #endif
@@ -150,10 +153,14 @@ namespace Microsoft.NodejsTools.Intellisense {
 
         private void CreateNewAnalyzer(AnalysisLimits limits) {
             _jsAnalyzer = new JsAnalyzer(limits);
-            if (_analysisLevel != AnalysisLevel.None) {
+            if (ShouldEnqueue()) {
                 _analysisQueue = new AnalysisQueue(this);
             }
             _fullyLoaded = true;
+        }
+
+        private bool ShouldEnqueue() {
+            return _analysisLevel != AnalysisLevel.None && _analysisLevel != AnalysisLevel.Preview;
         }
 
         #region Public API
@@ -253,7 +260,7 @@ namespace Microsoft.NodejsTools.Intellisense {
             }
 
             BufferParser bufferParser;
-            if (!buffer.Properties.TryGetProperty<BufferParser>(typeof(BufferParser), out bufferParser)) { 
+            if (!buffer.Properties.TryGetProperty<BufferParser>(typeof(BufferParser), out bufferParser)) {
                 return;
             }
 
@@ -319,7 +326,7 @@ namespace Microsoft.NodejsTools.Intellisense {
                 if (!reportErrors) {
                     TaskProvider.Clear(item.Entry, ParserTaskMoniker);
                 }
-                
+
                 if ((_reparseDateTime != null && new FileInfo(path).LastWriteTime > _reparseDateTime.Value)
                         || (reportErrors && !item.ReportErrors) ||
                         (item.Entry.Module == null || item.Entry.Unit == null)) {
@@ -370,24 +377,38 @@ namespace Microsoft.NodejsTools.Intellisense {
 
                 object mainFile;
                 if (json != null && json.TryGetValue("main", out mainFile) && mainFile is string) {
-                    AddPackageJson(packageJsonPath, (string)mainFile);
+                    List<string> dependencyList = GetDependencyListFromJson(json, "dependencies", "devDependencies", "optionalDependencies");
+                    AddPackageJson(packageJsonPath, (string)mainFile, dependencyList);
                 }
             }
         }
 
-        public void AddPackageJson(string path, string mainFile) {
+        private static List<string> GetDependencyListFromJson(Dictionary<string, object> json, params string[] dependencyTypes) {
+            var allDependencies = new List<string>();
+            foreach (var type in dependencyTypes) {
+                object dependencies;
+                json.TryGetValue(type, out dependencies);
+                var dep = dependencies as Dictionary<string, object>;
+                if (dep != null) {
+                    allDependencies.AddRange(dep.Keys.ToList());
+                }
+            }
+            return allDependencies;
+        }
+
+        public void AddPackageJson(string path, string mainFile, List<string> dependencies) {
             if (!_fullyLoaded) {
                 lock (_loadingDeltas) {
                     if (!_fullyLoaded) {
-                        _loadingDeltas.Add(() => AddPackageJson(path, mainFile));
+                        _loadingDeltas.Add(() => AddPackageJson(path, mainFile, dependencies));
                         return;
                     }
                 }
             }
 
-            if (_analysisLevel != AnalysisLevel.None) {
+            if (ShouldEnqueue()) {
                 _analysisQueue.Enqueue(
-                    _jsAnalyzer.AddPackageJson(path, mainFile),
+                    _jsAnalyzer.AddPackageJson(path, mainFile, dependencies),
                     AnalysisPriority.Normal
                 );
             }
@@ -664,7 +685,8 @@ namespace Microsoft.NodejsTools.Intellisense {
             }
 
             foreach (var item in _projectFiles) {
-                if (!File.Exists(item.Value.Entry.FilePath) || (!item.Value.Reloaded && !item.Value.Entry.IsBuiltin)) {
+                if ((!File.Exists(item.Value.Entry.FilePath) || !item.Value.Reloaded)
+                    && !item.Value.Entry.IsBuiltin) {
                     UnloadFile(item.Value.Entry);
                 }
             }
@@ -777,7 +799,9 @@ namespace Microsoft.NodejsTools.Intellisense {
                         foreach (var implicitItem in item.LoadedItems) {
                             implicitItem.ImplicitLoadCount--;
                             if (implicitItem.ImplicitLoadCount == 0) {
-                                _analysisQueue.Enqueue(_jsAnalyzer.RemoveModule(implicitItem.Entry), AnalysisPriority.Normal);
+                                if (_analysisLevel != AnalysisLevel.None) {
+                                    _analysisQueue.Enqueue(_jsAnalyzer.RemoveModule(implicitItem.Entry), AnalysisPriority.Normal);
+                                }
                                 ProjectItem implicitRemoved;
                                 _projectFiles.TryRemove(implicitItem.Entry.FilePath, out implicitRemoved);
                             }
@@ -792,7 +816,7 @@ namespace Microsoft.NodejsTools.Intellisense {
             }
 
             ClearParserTasks(entry);
-            if (_analysisLevel != AnalysisLevel.None) {
+            if (ShouldEnqueue()) {
                 _analysisQueue.Enqueue(_jsAnalyzer.RemoveModule(entry), AnalysisPriority.Normal);
             }
             ProjectItem removed;
@@ -844,7 +868,7 @@ namespace Microsoft.NodejsTools.Intellisense {
                 _projectFiles[path] = file = new ProjectItem(entry);
             }
 
-            if (_implicitProject) {
+            if (_implicitProject && _analysisLevel != AnalysisLevel.None) {
                 QueueDirectoryAnalysis(path, file);
             }
 
@@ -981,12 +1005,12 @@ namespace Microsoft.NodejsTools.Intellisense {
                 }
 
                 // enqueue analysis of the file
-                if (ast != null && _analysisLevel != AnalysisLevel.None) {
+                if (ast != null && ShouldEnqueue()) {
                     _analysisQueue.Enqueue(jsEntry, AnalysisPriority.Normal);
                 }
             } else if ((externalEntry = entry as IExternalProjectEntry) != null) {
                 externalEntry.ParseContent(reader ?? reader, cookie);
-                if (_analysisLevel != AnalysisLevel.None) {
+                if (ShouldEnqueue()) {
                     _analysisQueue.Enqueue(entry, AnalysisPriority.Normal);
                 }
             }
@@ -1033,7 +1057,7 @@ namespace Microsoft.NodejsTools.Intellisense {
                     if ((externalEntry = (entry as IExternalProjectEntry)) != null) {
                         var snapshotContent = new SnapshotSpanSourceCodeReader(new SnapshotSpan(snapshot, new Span(0, snapshot.Length)));
                         externalEntry.ParseContent(snapshotContent, new SnapshotCookie(snapshotContent.Snapshot));
-                        if (_analysisLevel != AnalysisLevel.None) {
+                        if (ShouldEnqueue()) {
                             _analysisQueue.Enqueue(entry, AnalysisPriority.High);
                         }
                     }
@@ -1057,7 +1081,7 @@ namespace Microsoft.NodejsTools.Intellisense {
                     }
 
                     jsProjEntry.UpdateTree(finalAst, new SnapshotCookie(snapshots[0])); // SnapshotCookie is not entirely right, we should merge the snapshots
-                    if (_analysisLevel != AnalysisLevel.None) {
+                    if (ShouldEnqueue()) {
                         _analysisQueue.Enqueue(entry, AnalysisPriority.High);
                     }
                 } else {
@@ -1172,16 +1196,26 @@ namespace Microsoft.NodejsTools.Intellisense {
                 }
             }
 
+            // Get the classifiers from beginning of the line to the beginning of snapSpan.
+            // The contents of snapSpan differ depending on what is determined in
+            // CompletionSource.GetApplicableSpan.
+            //
+            // In the case of:
+            //      var myIdentifier<cursor>
+            // the applicable span will be "myIdentifier", so GetClassificationSpans will operate on "var "
+            // 
+            // In the case of comments and string literals, the applicable span will be empty,
+            // so snapSpan.Start will occur at the current cursor position. 
             var tokens = classifier.GetClassificationSpans(new SnapshotSpan(start.GetContainingLine().Start, snapSpan.Start));
             if (tokens.Count > 0) {
                 // Check for context-sensitive intellisense
                 var lastClass = tokens[tokens.Count - 1];
 
-                if (lastClass.ClassificationType == classifier.Provider.Comment) {
-                    // No completions in comments
-                    return CompletionAnalysis.EmptyCompletionContext;
-                } else if (lastClass.ClassificationType == classifier.Provider.StringLiteral) {
-                    // String completion
+                if (lastClass.ClassificationType == classifier.Provider.Comment ||
+                    lastClass.ClassificationType == classifier.Provider.StringLiteral ||
+                    (lastClass.ClassificationType == classifier.Provider.Keyword &&
+                    _emptyCompletionContextKeywords.Contains(lastClass.Span.GetText()))) {
+                    // No completions in comments, strings, or directly after certain keywords.
                     return CompletionAnalysis.EmptyCompletionContext;
                 }
                 return null;
@@ -1258,7 +1292,7 @@ namespace Microsoft.NodejsTools.Intellisense {
         private void ClearParserTasks(IProjectEntry entry) {
             if (entry != null) {
                 TaskProvider.Clear(entry, ParserTaskMoniker);
-                
+
                 bool changed;
                 lock (_hasParseErrors) {
                     changed = _hasParseErrors.Remove(entry);
@@ -1305,7 +1339,7 @@ namespace Microsoft.NodejsTools.Intellisense {
 
         private bool LoadCachedAnalysis(AnalysisLimits limits) {
             string analysisDb = GetAnalysisPath();
-            if (File.Exists(analysisDb) && _analysisLevel != AnalysisLevel.None) {
+            if (File.Exists(analysisDb) && ShouldEnqueue()) {
                 FileStream stream = null;
                 bool disposeStream = true;
                 try {
@@ -1459,6 +1493,9 @@ namespace Microsoft.NodejsTools.Intellisense {
 
             if (NodejsPackage.Instance != null) {
                 switch (_analysisLevel) {
+                    case Options.AnalysisLevel.Medium:
+                        defaults = AnalysisLimits.MakeMediumAnalysisLimits();
+                        break;
                     case Options.AnalysisLevel.Low:
                         defaults = _lowLimits;
                         break;
@@ -1500,6 +1537,7 @@ namespace Microsoft.NodejsTools.Intellisense {
             limits.DictValueTypes = GetSetting(key, DictValueTypesId) ?? defaults.DictValueTypes;
             limits.IndexTypes = GetSetting(key, IndexTypesId) ?? defaults.IndexTypes;
             limits.AssignedTypes = GetSetting(key, AssignedTypesId) ?? defaults.AssignedTypes;
+            limits.NestedModulesLimit = GetSetting(key, NestedModulesLimitId) ?? defaults.NestedModulesLimit;
 
             return limits;
         }
@@ -1518,6 +1556,7 @@ namespace Microsoft.NodejsTools.Intellisense {
         private const string DictValueTypesId = "DictValueTypes";
         private const string IndexTypesId = "IndexTypes";
         private const string AssignedTypesId = "AssignedTypes";
+        private const string NestedModulesLimitId = "NestedModulesLimit";
 
         #endregion
     }

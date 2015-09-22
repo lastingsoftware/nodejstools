@@ -24,6 +24,7 @@ using System.Web;
 using EnvDTE;
 using Microsoft.NodejsTools.Debugger.Communication;
 using Microsoft.NodejsTools.Debugger.Remote;
+using Microsoft.NodejsTools.Logging;
 using Microsoft.NodejsTools.Project;
 using Microsoft.VisualStudio;
 using Microsoft.VisualStudio.Debugger.Interop;
@@ -60,7 +61,6 @@ namespace Microsoft.NodejsTools.Debugger.DebugEngine {
         private AD7Thread _mainThread;
         private bool _sdmAttached;
         private bool _processLoaded;
-        private bool _processLoadedRunning;
         private bool _loadComplete;
         private readonly object _syncLock = new object();
         private bool _attached;
@@ -118,13 +118,14 @@ namespace Microsoft.NodejsTools.Debugger.DebugEngine {
         public const string DirMappingSetting = "DIR_MAPPING";
 
         public AD7Engine() {
-            DebugWriteLine("AD7Engine Created ({0})", GetHashCode());
+            LiveLogger.WriteLine("--------------------------------------------------------------------------------");
+            LiveLogger.WriteLine("AD7Engine Created ({0})", GetHashCode());
             _breakpointManager = new BreakpointManager(this);
             Engines.Add(new WeakReference(this));
         }
 
         ~AD7Engine() {
-            DebugWriteLine("AD7Engine Finalized ({0})", GetHashCode());
+            LiveLogger.WriteLine("AD7Engine Finalized ({0})", GetHashCode());
             if (!_attached && _process != null) {
                 // detach the process exited event, we don't need to send the exited event
                 // which could happen when we terminate the process and check if it's still
@@ -190,7 +191,7 @@ namespace Microsoft.NodejsTools.Debugger.DebugEngine {
             int processId = EngineUtils.GetProcessId(rgpPrograms[0]);
             if (processId == 0) {
                 // engine only supports system processes
-                DebugWriteLine("AD7Engine failed to get process id during attach");
+                LiveLogger.WriteLine("AD7Engine failed to get process id during attach");
                 return VSConstants.E_NOTIMPL;
             }
 
@@ -227,7 +228,7 @@ namespace Microsoft.NodejsTools.Debugger.DebugEngine {
                 HandleLoadComplete();
             }
 
-            DebugWriteLine("AD7Engine Attach returning S_OK");
+            LiveLogger.WriteLine("AD7Engine Attach returning S_OK");
             return VSConstants.S_OK;
         }
 
@@ -238,7 +239,7 @@ namespace Microsoft.NodejsTools.Debugger.DebugEngine {
                 return;
             }
 
-            DebugWriteLine("Sending load complete ({0})", GetHashCode());
+            LiveLogger.WriteLine("Sending load complete ({0})", GetHashCode());
 
             AD7EngineCreateEvent.Send(this);
 
@@ -253,7 +254,7 @@ namespace Microsoft.NodejsTools.Debugger.DebugEngine {
             }
 
             lock (_syncLock) {
-                if (_processLoadedRunning) {
+                if (_processLoaded && _process.IsRunning()) {
                     Send(new AD7LoadCompleteRunningEvent(), AD7LoadCompleteRunningEvent.IID, _mainThread);
                 } else {
                     Send(new AD7LoadCompleteEvent(), AD7LoadCompleteEvent.IID, _mainThread);
@@ -482,8 +483,7 @@ namespace Microsoft.NodejsTools.Debugger.DebugEngine {
         // in which case Visual Studio uses the IDebugEngineLaunch2::LaunchSuspended method
         // The IDebugEngineLaunch2::ResumeProcess method is called to start the process after the process has been successfully launched in a suspended state.
         int IDebugEngineLaunch2.LaunchSuspended(string pszServer, IDebugPort2 port, string exe, string args, string dir, string env, string options, enum_LAUNCH_FLAGS launchFlags, uint hStdInput, uint hStdOutput, uint hStdError, IDebugEventCallback2 ad7Callback, out IDebugProcess2 process) {
-            DebugWriteLine("--------------------------------------------------------------------------------");
-            DebugWriteLine("AD7Engine LaunchSuspended Called with flags '{0}' ({1})", launchFlags, GetHashCode());
+            LiveLogger.WriteLine("AD7Engine LaunchSuspended Called with flags '{0}' ({1})", launchFlags, GetHashCode());
             AssertMainThread();
 
             Debug.Assert(_events == null);
@@ -528,7 +528,7 @@ namespace Microsoft.NodejsTools.Debugger.DebugEngine {
                                     if (dirMapping == null) {
                                         dirMapping = new List<string[]>();
                                     }
-                                    DebugWriteLine(String.Format("Mapping dir {0} to {1}", dirs[0], dirs[1]));
+                                    LiveLogger.WriteLine(String.Format("Mapping dir {0} to {1}", dirs[0], dirs[1]));
                                     dirMapping.Add(dirs);
                                 }
                                 break;
@@ -569,7 +569,7 @@ namespace Microsoft.NodejsTools.Debugger.DebugEngine {
             adProcessId.dwProcessId = (uint)_process.Id;
 
             EngineUtils.RequireOk(port.GetProcess(adProcessId, out process));
-            DebugWriteLine("AD7Engine LaunchSuspended returning S_OK");
+            LiveLogger.WriteLine("AD7Engine LaunchSuspended returning S_OK");
             Debug.Assert(process != null);
             Debug.Assert(!_process.HasExited);
 
@@ -603,7 +603,7 @@ namespace Microsoft.NodejsTools.Debugger.DebugEngine {
 
             if (_events == null) {
                 // process failed to start
-                DebugWriteLine("ResumeProcess fails, no events");
+                LiveLogger.WriteLine("ResumeProcess fails, no events");
                 return VSConstants.E_FAIL;
             }
 
@@ -615,7 +615,7 @@ namespace Microsoft.NodejsTools.Debugger.DebugEngine {
             int processId = EngineUtils.GetProcessId(process);
 
             if (processId != _process.Id) {
-                DebugWriteLine("ResumeProcess fails, wrong process");
+                LiveLogger.WriteLine("ResumeProcess fails, wrong process");
                 return VSConstants.S_FALSE;
             }
 
@@ -632,12 +632,12 @@ namespace Microsoft.NodejsTools.Debugger.DebugEngine {
             EngineUtils.RequireOk(portNotify.AddProgramNode(new AD7ProgramNode(_process.Id)));
 
             if (_ad7ProgramId == Guid.Empty) {
-                DebugWriteLine("ResumeProcess fails, empty program guid");
+                LiveLogger.WriteLine("ResumeProcess fails, empty program guid");
                 Debug.Fail("Unexpected problem -- IDebugEngine2.Attach wasn't called");
                 return VSConstants.E_FAIL;
             }
 
-            DebugWriteLine("ResumeProcess return S_OK");
+            LiveLogger.WriteLine("ResumeProcess return S_OK");
             return VSConstants.S_OK;
         }
 
@@ -940,7 +940,7 @@ namespace Microsoft.NodejsTools.Debugger.DebugEngine {
         #region Events
 
         internal void Send(IDebugEvent2 eventObject, string iidEvent, IDebugProgram2 program, IDebugThread2 thread) {
-            DebugWriteLine("AD7Engine Event: {0} ({1})", eventObject.GetType(), iidEvent);
+            LiveLogger.WriteLine("AD7Engine Event: {0} ({1})", eventObject.GetType(), iidEvent);
 
             // Check that events was not disposed
             var events = _events;
@@ -1047,7 +1047,7 @@ namespace Microsoft.NodejsTools.Debugger.DebugEngine {
         }
 
         private void OnThreadCreated(object sender, ThreadEventArgs e) {
-            DebugWriteLine("Thread created: " + e.Thread.Id);
+            LiveLogger.WriteLine("Thread created: " + e.Thread.Id);
 
             lock (_syncLock) {
                 var newThread = new AD7Thread(this, e.Thread);
@@ -1087,7 +1087,7 @@ namespace Microsoft.NodejsTools.Debugger.DebugEngine {
         }
 
         private void LaunchBrowserDebugger() {
-            DebugWriteLine("LaunchBrowserDebugger Started");
+            LiveLogger.WriteLine("LaunchBrowserDebugger Started");
 
             var vsDebugger = (IVsDebugger2)ServiceProvider.GlobalProvider.GetService(typeof(SVsShellDebugger));
 
@@ -1117,17 +1117,16 @@ namespace Microsoft.NodejsTools.Debugger.DebugEngine {
                 }
             }
 
-            DebugWriteLine("LaunchBrowserDebugger Completed");
+            LiveLogger.WriteLine("LaunchBrowserDebugger Completed");
         }
 
         private void OnStepComplete(object sender, ThreadEventArgs e) {
             Send(new AD7SteppingCompleteEvent(), AD7SteppingCompleteEvent.IID, _threads[e.Thread]);
         }
 
-        private void OnProcessLoaded(object sender, ProcessLoadedEventArgs e) {
+        private void OnProcessLoaded(object sender, ThreadEventArgs e) {
             lock (_syncLock) {
                 _processLoaded = true;
-                _processLoadedRunning = e.Running;
                 HandleLoadComplete();
             }
         }
@@ -1137,7 +1136,6 @@ namespace Microsoft.NodejsTools.Debugger.DebugEngine {
                 _processExitedEvent.Set();
                 lock (_syncLock) {
                     _processLoaded = false;
-                    _processLoadedRunning = false;
                     Send(new AD7ProgramDestroyEvent((uint)e.ExitCode), AD7ProgramDestroyEvent.IID, null);
                 }
             } catch (InvalidOperationException) {
@@ -1278,19 +1276,8 @@ namespace Microsoft.NodejsTools.Debugger.DebugEngine {
             }
         }
 
-        [Conditional("DEBUG")]
         private void DebugWriteCommand(string commandName) {
-            DebugWriteLine("AD7Engine Called " + commandName);
-        }
-
-        [Conditional("DEBUG")]
-        private void DebugWriteLine(string format, params object[] args) {
-            DebugWriteLine(string.Format(format, args));
-        }
-
-        [Conditional("DEBUG")]
-        private void DebugWriteLine(string message) {
-            Debug.WriteLine("[{0}] {1}", DateTime.UtcNow.TimeOfDay, message);
+            LiveLogger.WriteLine("AD7Engine Called " + commandName);
         }
     }
 }

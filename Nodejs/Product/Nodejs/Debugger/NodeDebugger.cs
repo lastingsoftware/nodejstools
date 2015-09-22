@@ -27,6 +27,7 @@ using Microsoft.NodejsTools.Debugger.Commands;
 using Microsoft.NodejsTools.Debugger.Communication;
 using Microsoft.NodejsTools.Debugger.Events;
 using Microsoft.NodejsTools.Debugger.Serialization;
+using Microsoft.NodejsTools.Logging;
 using Microsoft.NodejsTools.SourceMapping;
 using Microsoft.VisualStudioTools;
 using System.Collections.ObjectModel;
@@ -246,14 +247,17 @@ namespace Microsoft.NodejsTools.Debugger {
             }
         }
 
-        [Conditional("DEBUG")]
-        private void DebugWriteCommand(string commandName) {
-            DebugWriteLine("NodeDebugger Called " + commandName);
+        internal bool IsRunning() {
+            var backtraceCommand = new BacktraceCommand(CommandId, _resultFactory, fromFrame: 0, toFrame: 1);
+            var tokenSource = new CancellationTokenSource(_timeout);
+            if (TrySendRequestAsync(backtraceCommand, tokenSource.Token).GetAwaiter().GetResult()) {
+                return backtraceCommand.Running;
+            }
+            return false;
         }
 
-        [Conditional("DEBUG")]
-        private void DebugWriteLine(string message) {
-            Debug.WriteLine("[{0}] {1}", DateTime.UtcNow.TimeOfDay, message);
+        private void DebugWriteCommand(string commandName) {
+            LiveLogger.WriteLine("NodeDebugger Called " + commandName);
         }
 
         /// <summary>
@@ -330,7 +334,7 @@ namespace Microsoft.NodejsTools.Debugger {
                     // Stepping into or to autoresumed break
                     break;
                 default:
-                    Debug.WriteLine("Unexpected SteppingMode: {0}", _steppingMode);
+                    LiveLogger.WriteLine("Unexpected SteppingMode: {0}", _steppingMode);
                     break;
             }
 
@@ -499,18 +503,17 @@ namespace Microsoft.NodejsTools.Debugger {
             if (!backTraceTask.Wait((int)_timeout.TotalMilliseconds)) {
                 throw new TimeoutException("Timed out while performing initial backtrace.");
             }
-            bool running = backTraceTask.GetAwaiter().GetResult();
 
             // At this point we can fire events
             EventHandler<ThreadEventArgs> newThread = ThreadCreated;
             if (newThread != null) {
                 newThread(this, new ThreadEventArgs(mainThread));
             }
-
-            EventHandler<ProcessLoadedEventArgs> procLoaded = ProcessLoaded;
+            EventHandler<ThreadEventArgs> procLoaded = ProcessLoaded;
             if (procLoaded != null) {
-                procLoaded(this, new ProcessLoadedEventArgs(mainThread, running));
+                procLoaded(this, new ThreadEventArgs(MainThread));
             }
+
         }
 
         private void OnConnectionClosed(object sender, EventArgs args) {
@@ -786,7 +789,7 @@ namespace Microsoft.NodejsTools.Debugger {
             foreach (NodeStackFrame stackFrame in stackFrames) {
                 // Retrieve a local module
                 NodeModule module;
-                GetOrAddModule(stackFrame.Module, out module);
+                GetOrAddModule(stackFrame.Module, out module, stackFrame);
                 module = module ?? stackFrame.Module;
 
                 int line = stackFrame.Line;
@@ -1179,7 +1182,7 @@ namespace Microsoft.NodejsTools.Debugger {
         /// <summary>
         /// Fired when the process has started and is broken into the debugger, but before any user code is run.
         /// </summary>
-        public event EventHandler<ProcessLoadedEventArgs> ProcessLoaded;
+        public event EventHandler<ThreadEventArgs> ProcessLoaded;
 
         public event EventHandler<ThreadEventArgs> ThreadCreated;
         public event EventHandler<ThreadEventArgs> ThreadExited;
@@ -1205,11 +1208,12 @@ namespace Microsoft.NodejsTools.Debugger {
         /// </summary>
         /// <param name="module">New module.</param>
         /// <param name="value">Existing module.</param>
+        /// <param name="stackFrame">The stack frame linked to the module.</param>
         /// <returns>True if module was added otherwise false.</returns>
-        private bool GetOrAddModule(NodeModule module, out NodeModule value) {
+        private bool GetOrAddModule(NodeModule module, out NodeModule value, NodeStackFrame stackFrame = null) {
             value = null;
-
             string javaScriptFileName = module.JavaScriptFileName;
+
             if (string.IsNullOrEmpty(javaScriptFileName) ||
                 javaScriptFileName == NodeVariableType.UnknownModule ||
                 javaScriptFileName.StartsWith("binding:")) {
@@ -1221,6 +1225,7 @@ namespace Microsoft.NodejsTools.Debugger {
 
             // Try to get mapping for JS file
             ReadOnlyCollection<string> originalFileName = SourceMapper.MapToOriginal(javaScriptFileName);
+
             if (originalFileName == null) {
                 module = new NodeModule(module.Id, javaScriptFileName);
             } else {

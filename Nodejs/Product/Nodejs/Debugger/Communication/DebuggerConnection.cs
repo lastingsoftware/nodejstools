@@ -21,6 +21,8 @@ using System.Net.Sockets;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
+using Microsoft.NodejsTools.Logging;
+using Microsoft.VisualStudioTools;
 using Microsoft.VisualStudioTools.Project;
 using Newtonsoft.Json;
 
@@ -69,7 +71,7 @@ namespace Microsoft.NodejsTools.Debugger.Communication {
                 return;
             }
 
-            Debug.WriteLine("Request: " + message, typeof(DebuggerConnection).Name);
+            LiveLogger.WriteLine("Request: " + message, typeof(DebuggerConnection));
 
             var messageBody = _encoding.GetBytes(message);
             var messageHeader = _encoding.GetBytes(string.Format("Content-Length: {0}\r\n\r\n", messageBody.Length));
@@ -111,10 +113,49 @@ namespace Microsoft.NodejsTools.Debugger.Communication {
         /// <param name="uri">URI identifying the endpoint to connect to.</param>
         public void Connect(Uri uri) {
             Utilities.ArgumentNotNull("uri", uri);
+            LiveLogger.WriteLine("Debugger connecting to URI: {0}", uri);
 
             Close();
             lock (_networkClientLock) {
-                _networkClient = _networkClientFactory.CreateNetworkClient(uri);
+                int connection_attempts = 0;
+                const int MAX_ATTEMPTS = 5;
+                while (true) {
+                    connection_attempts++;
+                    try {
+                        // TODO: This currently results in a call to the synchronous TcpClient
+                        // constructor, which is a blocking call, and can take a couple of seconds
+                        // to connect (with timeouts and retries). This code is running on the UI
+                        // thread. Ideally this should be connecting async, or moved off the UI thread.
+                        _networkClient = _networkClientFactory.CreateNetworkClient(uri);
+
+                        // Unclear if the above can succeed and not be connected, but check for safety.
+                        // The code needs to either break out the while loop, or hit the retry logic
+                        // in the exception handler.
+                        if (_networkClient.Connected) {
+                            LiveLogger.WriteLine("Debugger connected successfully");
+                            break;
+                        }
+                        else {
+                            throw new SocketException();
+                        }
+                    }
+                    catch (Exception ex) {
+                        if (ex.IsCriticalException()) {
+                            throw;
+                        }
+                        LiveLogger.WriteLine("Connection attempt {0} failed with: {1}", connection_attempts, ex);
+                        if (connection_attempts >= MAX_ATTEMPTS) {
+                            throw;
+                        }
+                        else {
+                            // See above TODO. This should be moved off the UI thread or posted to retry
+                            // without blocking in the meantime. For now, this seems the lesser of two
+                            // evils. (The other being the debugger failing to attach on launch if the
+                            // debuggee socket wasn't open quickly enough).
+                            System.Threading.Thread.Sleep(200);
+                        }
+                    }
+                }
             }
 
             Task.Factory.StartNew(ReceiveAndDispatchMessagesWorker);
@@ -144,7 +185,7 @@ namespace Microsoft.NodejsTools.Debugger.Communication {
             } catch (ObjectDisposedException) {
             } catch (IOException) {
             } catch (Exception e) {
-                Debug.WriteLine(string.Format("Failed to write message {0}.", e), typeof(DebuggerConnection).Name);
+                LiveLogger.WriteLine(string.Format("Failed to write message {0}.", e), typeof(DebuggerConnection));
                 throw;
             }
         }
@@ -153,7 +194,7 @@ namespace Microsoft.NodejsTools.Debugger.Communication {
         /// Receives messages from debugger, parses them to extract the body, and dispatches them to <see cref="OutputMessage"/> listeners.
         /// </summary>
         private async void ReceiveAndDispatchMessagesWorker() {
-            Debug.WriteLine("Established connection.", typeof(DebuggerConnection).Name);
+            LiveLogger.WriteLine("Established connection.", typeof(DebuggerConnection));
 
             INetworkClient networkClient;
             lock (_networkClientLock) {
@@ -240,7 +281,7 @@ namespace Microsoft.NodejsTools.Debugger.Communication {
                     }
 
                     string message = _encoding.GetString(bodyBuffer, 0, contentLength);
-                    Debug.WriteLine("Response: " + message, typeof(DebuggerConnection).Name);
+                    LiveLogger.WriteLine("Response: " + message, typeof(DebuggerConnection));
 
                     // Notify subscribers.
                     var outputMessage = OutputMessage;
@@ -252,14 +293,14 @@ namespace Microsoft.NodejsTools.Debugger.Communication {
             } catch (IOException) {
             } catch (ObjectDisposedException) {
             } catch (DecoderFallbackException ex) {
-                Debug.WriteLine(string.Format("Error decoding response body: {0}", ex), typeof(DebuggerConnection).Name);
+                LiveLogger.WriteLine(string.Format("Error decoding response body: {0}", ex), typeof(DebuggerConnection));
             } catch (JsonReaderException ex) {
-                Debug.WriteLine(string.Format("Error parsing JSON response: {0}", ex), typeof(DebuggerConnection).Name);
+                LiveLogger.WriteLine(string.Format("Error parsing JSON response: {0}", ex), typeof(DebuggerConnection));
             } catch (Exception ex) {
-                Debug.WriteLine(string.Format("Message processing failed: {0}", ex), typeof(DebuggerConnection).Name);
+                LiveLogger.WriteLine(string.Format("Message processing failed: {0}", ex), typeof(DebuggerConnection));
                 throw;
             } finally {
-                Debug.WriteLine("Connection was closed.", typeof(DebuggerConnection).Name);
+                LiveLogger.WriteLine("Connection was closed.", typeof(DebuggerConnection));
 
                 var connectionClosed = ConnectionClosed;
                 if (connectionClosed != null) {
