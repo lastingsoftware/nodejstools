@@ -211,16 +211,16 @@ namespace Microsoft.NodejsTools.Project {
         }
 
         private bool DoesProjectSupportDebugging() {
-            var typeScriptOutFile = _project.GetProjectProperty("TypeScriptOutFile");
-            if (!string.IsNullOrEmpty(typeScriptOutFile)) {
-                return MessageBox.Show(
-                    "This TypeScript project has 'Combine Javascript output into file' option enabled. This option is not supported by NTVS debugger, " +
-                    "and may result in erratic behavior of breakpoints, stepping, and debug tool windows. Are you sure you want to start debugging?",
-                    SR.ProductName,
-                    MessageBoxButtons.YesNo,
-                    MessageBoxIcon.Warning
-                    ) == DialogResult.Yes;
-            }
+            //var typeScriptOutFile = _project.GetProjectProperty("TypeScriptOutFile");
+            //if (!string.IsNullOrEmpty(typeScriptOutFile)) {
+            //    return MessageBox.Show(
+            //        "This TypeScript project has 'Combine Javascript output into file' option enabled. This option is not supported by NTVS debugger, " +
+            //        "and may result in erratic behavior of breakpoints, stepping, and debug tool windows. Are you sure you want to start debugging?",
+            //        SR.ProductName,
+            //        MessageBoxButtons.YesNo,
+            //        MessageBoxIcon.Warning
+            //        ) == DialogResult.Yes;
+            //}
 
             return true;
         }
