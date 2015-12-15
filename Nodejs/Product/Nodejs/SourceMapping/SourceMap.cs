@@ -59,7 +59,10 @@ namespace Microsoft.NodejsTools.SourceMapping {
         /// </summary>
         /// <param name="input"></param>
         internal SourceMap(TextReader input) {
-            var serializer = new JavaScriptSerializer();
+            var serializer = new JavaScriptSerializer()
+            {
+                MaxJsonLength = int.MaxValue
+            };
             _mapInfo = serializer.Deserialize<Dictionary<string, object>>(input.ReadToEnd());
             if (Version != 3) {
                 throw new NotSupportedException("Only V3 source maps are supported");

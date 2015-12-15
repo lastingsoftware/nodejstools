@@ -51,6 +51,7 @@ namespace Microsoft.NodejsTools.Project {
                 // We analyze if we are a member item or the file is included
                 // Also, it should either be marked as compile or not have an item type name (value is null for node_modules
                 return !ProjectMgr.DelayedAnalysisQueue.Contains(this) &&
+                    (!String.Equals(Path.GetExtension(this.FileName), NodejsConstants.TypeScriptExtension, StringComparison.OrdinalIgnoreCase)) &&
                     (!IsNonMemberItem || ProjectMgr.IncludeNodejsFile(this)) &&
                     (ItemNode.ItemTypeName == ProjectFileConstants.Compile || string.IsNullOrEmpty(ItemNode.ItemTypeName));
 
