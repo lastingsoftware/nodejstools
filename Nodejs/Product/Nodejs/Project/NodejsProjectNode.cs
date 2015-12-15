@@ -52,8 +52,6 @@ namespace Microsoft.NodejsTools.Project {
 
         // We delay analysis until things calm down in the node_modules folder.
         internal Queue<NodejsFileNode> DelayedAnalysisQueue = new Queue<NodejsFileNode>();
-        private FileWatcher _nodeModulesWatcher;
-        private readonly string[] _watcherExtensions = { ".js", ".json" };
         private object _idleNodeModulesLock = new object();
         private volatile bool _isIdleNodeModules = false;
         private Timer _idleNodeModulesTimer;
@@ -81,35 +79,6 @@ namespace Microsoft.NodejsTools.Project {
             }
         }
 
-        private void CreateIdleNodeModulesWatcher() {
-            try {
-                _idleNodeModulesTimer = new Timer(OnIdleNodeModules);
-
-                // This handles the case where there are multiple node_modules folders in a project.
-                _nodeModulesWatcher = new FileWatcher(ProjectHome) {
-                    IncludeSubdirectories = true,
-                    NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.CreationTime,
-                    EnableRaisingEvents = true
-                };
-
-                _nodeModulesWatcher.Changed += OnNodeModulesWatcherChanged;
-                _nodeModulesWatcher.Created += OnNodeModulesWatcherChanged;
-                _nodeModulesWatcher.Deleted += OnNodeModulesWatcherChanged;
-
-                RestartFileSystemWatcherTimer();
-            } catch (Exception ex) {
-                if (_nodeModulesWatcher != null) {
-                    _nodeModulesWatcher.Dispose();
-                }
-
-                if (ex is IOException || ex is ArgumentException) {
-                    Debug.WriteLine("Error starting FileWatcher:\r\n{0}", ex);
-                } else {
-                    throw;
-                }
-            }
-        }
-
         private void OnIdleNodeModules(object state) {
             lock (_idleNodeModulesLock) {
                 _isIdleNodeModules = true;
@@ -122,30 +91,28 @@ namespace Microsoft.NodejsTools.Project {
                     }
                 }
                 var fileNode = DelayedAnalysisQueue.Dequeue();
-                fileNode.Analyze();
-            }
-        }
-
-        private void OnNodeModulesWatcherChanged(object sender, FileSystemEventArgs e) {
-            try {
-                var extension = Path.GetExtension(e.FullPath);
-                if (e.FullPath.Contains(NodejsConstants.NodeModulesFolder) && _watcherExtensions.Any(extension.Equals)) {
-                    RestartFileSystemWatcherTimer();
+                if (fileNode != null) {
+                    fileNode.Analyze();
                 }
-            } catch (ArgumentException) {
-                // Occurs for invalid characters in the filepath. Don't bother restarting the idle timer.
             }
         }
 
-        private void RestartFileSystemWatcherTimer() {
+        internal void EnqueueForDelayedAnalysis(NodejsFileNode fileNode) {
+            DelayedAnalysisQueue.Enqueue(fileNode);
+            RestartIdleNodeModulesTimer();
+        }
+
+        private void RestartIdleNodeModulesTimer() {
             lock (_idleNodeModulesLock) {
                 _isIdleNodeModules = false;
-            }
 
-            // The cooldown time here is longer than the cooldown time we use in NpmController.
-            // This gives the Npm component ample time to build up the npm node tree,
-            // so that we can query it later for perf optimizations.
-            _idleNodeModulesTimer.Change(3000, Timeout.Infinite);
+                // The cooldown time here is longer than the cooldown time we use in NpmController.
+                // This gives the Npm component ample time to build up the npm node tree,
+                // so that we can query it later for perf optimizations.
+                if (_idleNodeModulesTimer != null) {
+                    _idleNodeModulesTimer.Change(3000, Timeout.Infinite);
+                }
+            }
         }
 
         private static string[] _excludedAvailableItems = new[] {
@@ -412,25 +379,6 @@ namespace Microsoft.NodejsTools.Project {
             return new NodejsProjectNodeProperties(this);
         }
 
-        public override int GetPropertyValue(string propertyName, string configName, uint storage, out string propertyValue) {
-            propertyValue = null;
-            switch (propertyName) {
-                case "DockerLinuxDockerfileContents":
-                    propertyValue = DockerfileWizardExtension.GetDockerfileWithReplacements(
-                        File.ReadAllText(@"FileTemplates\ReferenceFiles\Dockerfile"),
-                        DTE
-                    );
-                    return VSConstants.S_OK;
-                case "DockerAppType":
-                    propertyValue = "Node.js";
-                    return VSConstants.S_OK;
-                case "DockerDefaultPublishContainerPort":
-                    propertyValue = "8080";
-                    return VSConstants.S_OK;
-            }
-            return base.GetPropertyValue(propertyName, configName, storage, out propertyValue);
-        }
-
         protected override Stream ProjectIconsImageStripStream {
             get {
                 return typeof(ProjectNode).Assembly.GetManifestResourceStream("Microsoft.VisualStudioTools.Resources.Icons.SharedProjectImageList.bmp");
@@ -690,7 +638,7 @@ namespace Microsoft.NodejsTools.Project {
             if (null == ModulesNode) {
                 ModulesNode = new NodeModulesNode(this);
                 AddChild(ModulesNode);
-                CreateIdleNodeModulesWatcher();
+                _idleNodeModulesTimer = new Timer(OnIdleNodeModules);
             }
         }
 
@@ -972,8 +920,14 @@ namespace Microsoft.NodejsTools.Project {
                     if (_analyzer.RemoveUser()) {
                         _analyzer.Dispose();
                     }
-
                     _analyzer = null;
+                }
+
+                lock (_idleNodeModulesLock) {
+                    if (_idleNodeModulesTimer != null) {
+                        _idleNodeModulesTimer.Dispose();
+                    }
+                    _idleNodeModulesTimer = null;
                 }
 
                 NodejsPackage.Instance.IntellisenseOptionsPage.SaveToDiskChanged -= IntellisenseOptionsPageSaveToDiskChanged;
