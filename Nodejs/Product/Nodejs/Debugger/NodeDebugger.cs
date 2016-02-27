@@ -541,7 +541,7 @@ namespace Microsoft.NodejsTools.Debugger {
                         foreach (var breakpoint in _breakpointBindings) {
                             var target = breakpoint.Value.Breakpoint.Target;
                             var tsTarget = this.SourceMapper.MapToOriginal(target.FileName, target.Line, target.Column);
-                            if (target.FileName == tsTarget.FileName) {
+                            if (tsTarget == null || target.FileName == tsTarget.FileName) {
                                 // attempt to rebind the breakpoint
                                 DebuggerClient.RunWithRequestExceptionsHandled(async () => {
                                     await breakpoint.Value.Breakpoint.BindAsync().WaitAsync(TimeSpan.FromSeconds(2));

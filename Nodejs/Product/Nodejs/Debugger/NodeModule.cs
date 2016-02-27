@@ -31,7 +31,7 @@ namespace Microsoft.NodejsTools.Debugger {
         }
 
         public NodeModule(int id, string[] fileNames, string javaScriptFileName) {
-            Debug.Assert(javaScriptFileName != null);
+            // Debug.Assert(javaScriptFileName != null);
             Debug.Assert(fileNames.Length > 0);
 
             _id = id;
